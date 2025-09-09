@@ -23,6 +23,9 @@ uv.lock
 # VS Code
 .vscode/
 
+# Redis
+dump.rdb
+
 # Docs files
 src/apps/info_retrieval/docs/*.*
 src/apps/info_retrieval/all_docs/*.*
