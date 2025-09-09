@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual env
+.venv/
+env/
+venv/
+
+# macOS
+.DS_Store
+
+# uv
+uv.lock
+
+# VS Code
+.vscode/
+
+# Docs files
+src/apps/info_retrieval/docs/*.*
+src/apps/info_retrieval/all_docs/*.*
+
+# Dev files
+helper.md

@@ -1,0 +1,48 @@
+[project]
+name = "agentic-course"
+version = "0.1.0"
+description = "Agentic AI Projects"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "accelerate>=1.10.1",
+    "autogen>=0.9.9",
+    "chromadb>=1.0.20",
+    "crewai>=0.177.0",
+    "datasets>=4.0.0",
+    "fastapi>=0.116.1",
+    "flagembedding",
+    "gradio>=5.44.1",
+    "jupyterlab>=4.4.7",
+    "langchain>=0.3.27",
+    "langchain-community>=0.3.29",
+    "llama-index>=0.13.6",
+    "llama-index-embeddings-ollama>=0.8.3",
+    "llama-index-llms-langchain>=0.7.1",
+    "llama-index-llms-ollama>=0.7.2",
+    "llama-index-postprocessor-flag-embedding-reranker>=0.4.1",
+    "notebook>=7.4.5",
+    "numpy>=2.3.2",
+    "ollama>=0.5.3",
+    "pandas>=2.2.3",
+    "pinecone-client>=6.0.0",
+    "polars>=1.33.0",
+    "sentence-transformers>=5.1.0",
+    "streamlit>=1.49.1",
+    "torch>=2.8.0",
+    "torchaudio>=2.8.0",
+    "torchvision>=0.23.0",
+    "transformers>=4.56.1",
+    "uvicorn>=0.35.0",
+    "weaviate-client>=4.16.9",
+]
+
+[tool.uv.sources]
+flagembedding = { git = "https://github.com/FlagOpen/FlagEmbedding.git" }
+
+[dependency-groups]
+dev = [
+    "black>=25.1.0",
+    "pytest>=8.4.2",
+    "ruff>=0.12.12",
+]
