@@ -32,3 +32,7 @@ src/apps/info_retrieval/all_docs/*.*
 
 # Dev files
 helper.md
+
+# Env variables
+.env
+.python-version
