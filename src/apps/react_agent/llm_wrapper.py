@@ -1,0 +1,226 @@
+import json
+from openai import OpenAI
+from pydantic import ValidationError
+
+from tools import ToolRegistry, parse_llm_response
+
+
+# =========================================================
+# SYSTEM PROMPT
+# =========================================================
+
+SYSTEM_PROMPT = """
+You are a structured ReAct agent.
+
+You MUST ALWAYS return valid JSON — nothing else.
+No markdown. No explanation outside JSON.
+
+You have two response formats:
+
+--------------------------------------------------
+TOOL CALL (when you need to use a tool)
+--------------------------------------------------
+
+{{
+  "action": "tool",
+  "thought": "brief reason why you need this tool",
+  "tool_name": "tool name",
+  "args": {{
+    "param": "value"
+  }}
+}}
+
+--------------------------------------------------
+FINAL ANSWER (when you have everything you need)
+--------------------------------------------------
+
+{{
+  "action": "final",
+  "answer": "your full answer to the user"
+}}
+
+--------------------------------------------------
+AVAILABLE TOOLS
+--------------------------------------------------
+
+{tools}
+
+--------------------------------------------------
+RULES
+--------------------------------------------------
+
+- Only call tools listed above
+- Arguments MUST match each tool's input_schema exactly
+- One tool call per response
+- Return ONLY valid JSON
+"""
+
+# Rules Explanation
+# Why these rules need to be strict?
+# LLMs are trained to be helpful and will often try to “help” by doing math 
+# or reasoning internally. 
+# But we want our agent to be observable and reliable. 
+# By forcing it to use tools for every operation:
+# We can log and debug each step
+# We can swap tool implementations without changing the agent
+# We can test tools independently
+# We maintain a clear audit trail of actions
+# This is the essence of the ReAct pattern: 
+# explicit reasoning (“thought”) followed by explicit actions (“tool_name” + “args”).
+
+# =========================================================
+# REACT AGENT
+# =========================================================
+
+class ReactAgent:
+    """
+    A ReAct (Reasoning + Acting) agent that:
+    1. Receives a task
+    2. Iteratively calls tools to gather information
+    3. Returns a final answer once all sub-tasks are resolved
+
+    Works with any OpenAI-compatible API, including Ollama.
+    """
+
+    def __init__(
+        self,
+        client: OpenAI,
+        registry: ToolRegistry,
+        model: str = "Qwen3.6-35B-A3B-4bit",
+        max_iterations: int = 10,
+        verbose: bool = True,
+    ):
+        self.client = client
+        self.registry = registry
+        self.model = model
+        self.max_iterations = max_iterations
+        self.verbose = verbose
+
+    def _log(self, *args):
+        if self.verbose:
+            print(*args)
+
+    def run(self, task: str) -> str:
+        system_prompt = SYSTEM_PROMPT.format(tools=self.registry.describe_tools())
+        
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": task},
+        ]
+
+        for iteration in range(self.max_iterations):
+            self._log(f"\n{'='*48}")
+            self._log(f"  ITERATION {iteration + 1}")
+            self._log(f"{'='*48}\n")
+
+            # if len(messages) > 7:  # system + user + last 5 turns
+            #     messages = [messages[0], {"role": "system", "content": "..."}] + messages[-6:]
+
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                # temperature=0.0,  # CRITICAL for JSON output
+                # response_format={"type": "json_object"},  # Forces strict JSON (if supported)
+                # max_tokens=1024,
+            )
+
+            raw = response.choices[0].message.content
+            self._log(f"[LLM RAW]\n{raw}\n")
+
+            # -------------------------------------------------
+            # VALIDATE RESPONSE
+            # -------------------------------------------------
+
+            # Strip markdown code fences if the model added them
+            clean = raw.strip()
+            if clean.startswith("```"):
+                clean = clean.split("```")[1]          # drop opening fence
+                if clean.startswith("json"):
+                    clean = clean[4:]                  # drop the "json" language tag
+                clean = clean.strip()
+
+            # The code fence stripping is the key addition — local models almost always wrap their first response in ```json ``` 
+            # even when explicitly told not to. Stripping it before parsing means the retry loop is never triggered for this common case.
+            
+            # Parse JSON
+            try:
+                parsed = json.loads(clean)
+            except json.JSONDecodeError:
+                # Model may have returned multiple JSON objects separated by newlines
+                # Handle multiple concatenated JSON objects
+                try:
+                    objects = []
+                    decoder = json.JSONDecoder()
+                    s = clean.strip()
+                    idx = 0
+                    while idx < len(s):
+                        obj, end_idx = decoder.raw_decode(s, idx)
+                        objects.append(obj)
+                        idx = end_idx
+                        # skip whitespace between objects
+                        while idx < len(s) and s[idx] in ' \t\n\r':
+                            idx += 1
+                    parsed = objects if len(objects) > 1 else objects[0]
+                except (json.JSONDecodeError, Exception) as e:
+                    self._log(f"[ERROR] Could not parse JSON: {e}")
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            f"Your response was not valid JSON.\n\nError: {e}\n\n"
+                            "Return a single JSON object. No markdown, no code fences, no extra text."
+                        ),
+                    })
+                    continue
+
+            # -------------------------------------------------
+            # VALIDATE AGAINST PYDANTIC
+            # -------------------------------------------------
+            
+            try:
+                validated = parse_llm_response(parsed)
+            except (ValueError, ValidationError) as e:
+                self._log(f"[ERROR] Schema mismatch: {e}")
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        f"Your JSON did not match the required schema.\n\nError: {e}\n\n"
+                        "Return ONLY valid JSON matching the schema."
+                    ),
+                })
+                continue
+
+            # -------------------------------------------------
+            # FINAL ANSWER
+            # -------------------------------------------------
+            
+            if validated.action == "final":
+                self._log("[DONE] Final answer reached.")
+                return validated.answer
+
+            # -------------------------------------------------
+            # TOOL EXECUTION
+            # -------------------------------------------------
+
+            self._log(f"[THOUGHT] {validated.thought}")
+            self._log(f"[TOOL]    {validated.tool_name}")
+            self._log(f"[ARGS]    {validated.args}")
+
+            try:
+                result = self.registry.execute_tool(validated.tool_name, validated.args)
+            except Exception as e:
+                result = f"Tool execution failed: {str(e)}"
+
+            self._log(f"[RESULT]  {result}")
+
+            # -------------------------------------------------
+            # APPEND TRAJECTORY
+            # -------------------------------------------------
+            
+            # Append tool call + observation to history
+            messages.append({"role": "assistant", "content": raw})
+            messages.append({
+                "role": "user",
+                "content": f"Observation from tool '{validated.tool_name}':\n\n{result}",
+            })
+
+        raise RuntimeError(f"Agent exceeded max_iterations ({self.max_iterations})")
