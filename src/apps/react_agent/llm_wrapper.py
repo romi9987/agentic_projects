@@ -113,15 +113,17 @@ class ReactAgent:
             self._log(f"  ITERATION {iteration + 1}")
             self._log(f"{'='*48}\n")
 
-            # if len(messages) > 7:  # system + user + last 5 turns
-            #     messages = [messages[0], {"role": "system", "content": "..."}] + messages[-6:]
+            # TRUNCATE HISTORY: Keep only system + current task + last 5 turns
+            # This prevents context bloat and local model regression
+            if len(messages) > 7:
+                messages = [messages[0], {"role": "system", "content": "..."}] + messages[-6:]
 
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
-                # temperature=0.0,  # CRITICAL for JSON output
-                # response_format={"type": "json_object"},  # Forces strict JSON (if supported)
-                # max_tokens=1024,
+                temperature=0.0,  # CRITICAL for JSON output
+                response_format={"type": "json_object"},  # Forces strict JSON (if supported)
+                max_tokens=1024,
             )
 
             raw = response.choices[0].message.content
