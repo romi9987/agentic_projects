@@ -124,6 +124,32 @@ class ReactAgent:
                 temperature=0.0,  # CRITICAL for JSON output
                 response_format={"type": "json_object"},  # Forces strict JSON (if supported)
                 max_tokens=1024,
+                extra_body={
+                    "repetition_penalty": 1.1,  # Reduces hallucination loops
+                    # "mirostat_mode": 2,         # Adaptive temperature for local models
+                    # "mirostat_tau": 0.5,
+                }
+                # To achieve a highly factual, deterministic response like you get with standard temperature=0, 
+                # you must set mirostat_mode: 0 (or remove Mirostat entirely).
+                # Your current configuration contains a major conflict: mirostat_mode: 2 completely overrides temperature=0.0. 
+                # When Mirostat is active, the model ignores your zero-temperature setting 
+                # and actively forces "surprise" (randomness) back into the text.
+                
+                # temperature = 0.0 (The Strict Predictor): Normally, this forces the model to use "greedy sampling." 
+                # It completely eliminates randomness and tells the AI to always pick the single most probable word next. 
+                # This is the industry-standard setting for facts, code, and math.
+
+                # repetition_penalty = 1.1 (The Loop Breaker): This penalizes words that have already been used recently. 
+                # It works perfectly alongside temperature=0, acting as a tiny safety guardrail to ensure the rigid, 
+                # zero-temperature logic doesn't get stuck repeating the exact same sentence over and over.
+
+                # mirostat_mode = 2 (The Chaos Controller): This tells the engine to turn on the Mirostat v2 algorithm. 
+                # Mirostat's entire purpose is to prevent the AI from being fully predictable. 
+                # It treats your temperature as a loose starting baseline but takes complete control over word selection.
+
+                # mirostat_tau = 0.5 (The Surprise Target): This is the target "perplexity" (or chaos level) Mirostat is trying to hit. 
+                # A value of 0.5 is low, but because Mirostat is on, it will still force the model 
+                # to occasionally pick lower-probability words just to keep the text from becoming a repetitive loop.
             )
 
             raw = response.choices[0].message.content
