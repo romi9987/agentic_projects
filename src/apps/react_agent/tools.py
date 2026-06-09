@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import requests
 from datetime import datetime
 from ddgs import DDGS
@@ -90,15 +91,19 @@ class ToolRegistry: # use it mainly to register and retrieve tools
     # def get_tool_call_args_type(self):
     #     input_args_models = [tool.input_schema for tool in self.tools.values()]
     #     return Union[tuple(input_args_models)]
-    # get_tool_names generates a Literal type containing only valid tool names: 
+    
+    # execute_tool checks valid tool names: 
     # Literal["add", "multiply"]. This is a powerful constraint, 
     # the LLM can only return tool names that actually exist in the registry.
-    # def get_tool_names(self):
-    #     return Literal[*self.tools.keys()]
     def execute_tool(self, name: str, args: Dict[str, Any]) -> Any:
         tool = self.get(name)
-        validated_args = tool.input_schema(**args)
-        return tool(**validated_args.model_dump())
+        if not tool:
+            return f"Error: Unknown tool '{name}'. Available: {list(self.tools.keys())}"
+        try:
+            validated_args = tool.input_schema(**args)
+            return tool(**validated_args.model_dump())
+        except Exception as e:
+            return f"Tool execution error: {str(e)}"
 
     def describe_tools(self) -> str:
         return json.dumps(
@@ -271,6 +276,14 @@ def parse_llm_response(data):
             data = data[0]
         else:
             return [_parse_single(item) for item in data]
+    elif isinstance(data, str):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", data.strip())
+        cleaned = re.sub(r"\s*```$", "", cleaned).strip()
+        try:
+            data = json.loads(cleaned)
+        except json.JSONDecodeError:
+            # Fallback: treat entire string as final answer
+            return FinalAnswer(answer=data.strip())
     return _parse_single(data)
 
 
