@@ -113,10 +113,10 @@ class ReactAgent:
             self._log(f"  ITERATION {iteration + 1}")
             self._log(f"{'='*48}\n")
 
-            # TRUNCATE HISTORY: Keep only system + current task + last 5 turns
+            # TRUNCATE HISTORY: Keep only system + current task + last 9 turns
             # This prevents context bloat and local model regression
-            if len(messages) > 7:
-                messages = [messages[0], {"role": "system", "content": "..."}] + messages[-6:]
+            if len(messages) > 10:
+                messages = [messages[0], {"role": "system", "content": "..."}] + messages[-9:]
 
             response = self.client.chat.completions.create(
                 model=self.model,
