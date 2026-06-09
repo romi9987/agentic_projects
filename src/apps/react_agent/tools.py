@@ -106,14 +106,7 @@ class ToolRegistry: # use it mainly to register and retrieve tools
             return f"Tool execution error: {str(e)}"
 
     def describe_tools(self) -> str:
-        return json.dumps(
-            [
-            tool.to_prompt_schema()
-            for tool in self.tools.values()
-            ],
-            indent=2,
-        )
-
+        return json.dumps(self.list_tools(), indent=2)
 
 # =========================================================
 # TOOL FUNCTIONS
