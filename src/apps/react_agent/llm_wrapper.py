@@ -100,6 +100,31 @@ class ReactAgent:
         if self.verbose:
             print(*args)
 
+    def _format_history(self, messages: list[dict]) -> list[dict]:
+        """
+        Ensure all messages are valid OpenAI-compatible dicts.
+        This agent uses JSON-in-text (ReAct pattern), so all content stays
+        as plain strings. Native tool call format would require a separate
+        implementation.
+
+        Internal roles used by this agent:
+            system    → instructions + tool descriptions
+            user      → task input + tool observations
+            assistant → raw LLM JSON responses
+        """
+        formatted = []
+        for msg in messages:
+            role = msg.get("role")
+            content = str(msg.get("content", ""))
+
+            if role in ("system", "user", "assistant"):
+                formatted.append({"role": role, "content": content})
+            else:
+                # Skip unknown roles rather than silently corrupting history
+                self._log(f"[WARN] Skipping unknown message role: '{role}'")
+
+        return formatted
+
     def _build_messages(self, task: str) -> list:
         """Build the initial messages list."""
         system_prompt = SYSTEM_PROMPT.format(tools=self.registry.describe_tools())
@@ -121,7 +146,7 @@ class ReactAgent:
         """Call the LLM and get raw text back."""
         response = self.client.chat.completions.create(
             model=self.model,
-            messages=messages,
+            messages=self._format_history(messages),
             temperature=0.0,
             max_tokens=1024,
             extra_body={
