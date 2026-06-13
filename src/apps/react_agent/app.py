@@ -1,7 +1,13 @@
+import os
+from dotenv import load_dotenv
 from openai import OpenAI
+
 from tools import registry
 from llm_wrapper import ReactAgent
+from memory import MemoryStore
 
+
+load_dotenv()
 
 def run_once(agent: ReactAgent, task: str):
     """Run the agent on a single task and print the result."""
@@ -35,16 +41,28 @@ def chat_loop(agent: ReactAgent):
 if __name__ == "__main__":
 
     client = OpenAI(
-        base_url="http://localhost:8000/v1",
+        # base_url="http://localhost:8000/v1", # base_url for omlx
+        base_url="http://localhost:1234/v1", # base_url for lmstudio
         api_key="omlx",  # required by the library, ignored by Omlx
+    )
+
+    # We create a global memory store that persists to disk
+    memory_store = MemoryStore(
+        file_path=os.getenv("AGENT_MEMORY_PATH", "agent_memory.json"),  # fallback to local
+        # The max_entries parameter controls how many recent conversations we inject into context. 
+        # Setting this to 50 means we'll load the last 50 user-assistant exchanges, 
+        # which is typically 2500-10000 tokens.
+        max_entries=50,
     )
 
     agent = ReactAgent(
         client=client,
         registry=registry,
-        model="Qwen3.6-35B-A3B-4bit",
+        model="qwen_qwen3-coder-next",
         max_iterations=10,
         verbose=True,
+        memory_store=memory_store,       # pass memory in
+        memory_injection_limit=10,       # inject last 10 turns as context
     )
 
     # --- Single task demo ---
@@ -54,7 +72,7 @@ if __name__ == "__main__":
     What's the weather in Gdansk?
     What are the latest developments in Claude AI models?
     """
-    run_once(agent, task)
+    # run_once(agent, task)
 
     # --- Drop into interactive chat after the demo ---
     chat_loop(agent)

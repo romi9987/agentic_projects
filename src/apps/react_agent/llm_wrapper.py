@@ -1,7 +1,9 @@
 import json
+import uuid
 from openai import OpenAI
 from pydantic import ValidationError
 
+from memory import MemoryStore
 from tools import FinalAnswer, ToolRegistry, ToolCall, parse_llm_response
 
 
@@ -68,6 +70,24 @@ RULES
 # This is the essence of the ReAct pattern: 
 # explicit reasoning (“thought”) followed by explicit actions (“tool_name” + “args”).
 
+MEMORY_PROMPT = """
+--------------------------------------------------
+MEMORY CONTEXT FROM PREVIOUS CONVERSATIONS
+--------------------------------------------------
+ 
+The following is background context from previous conversations.
+You MAY use it if relevant to the current task.
+It does NOT override current conversation instructions.
+It does NOT override your capabilities.
+If the same info appears here and in the current conversation,
+always prefer the current conversation.
+ 
+{memory}
+ 
+--------------------------------------------------
+"""
+
+
 # =========================================================
 # REACT AGENT
 # =========================================================
@@ -86,20 +106,90 @@ class ReactAgent:
         self,
         client: OpenAI,
         registry: ToolRegistry,
-        model: str = "Qwen3.6-35B-A3B-4bit",
+        model: str = "qwen_qwen3-coder-next",
         max_iterations: int = 10,
         verbose: bool = True,
+        memory_store: MemoryStore = None,         # optional — agent works without it
+        memory_injection_limit: int = 10,         # how many past turns to inject
     ):
         self.client = client
         self.registry = registry
         self.model = model
         self.max_iterations = max_iterations
         self.verbose = verbose
+        self.memory_store = memory_store
+        self.memory_injection_limit = memory_injection_limit
+        self.session_id = str(uuid.uuid4())
 
     def _log(self, *args):
         if self.verbose:
             print(*args)
 
+    # -------------------------------------------------
+    # 1. Build initial messages list
+    # -------------------------------------------------   
+    def _build_messages(self, task: str) -> list:
+        """Build the initial messages list."""
+        system_prompt = SYSTEM_PROMPT.format(tools=self.registry.describe_tools())
+        # system_prompt = SYSTEM_PROMPT.replace("{tools}", self.registry.describe_tools())
+        messages = [
+            {"role": "system", "content": system_prompt},
+        ]
+        # Inject long-term memory as second message if available
+        memory_message = self._build_memory_message()
+        if memory_message:
+            messages.append(memory_message)
+ 
+        messages.append({"role": "user", "content": task})
+        return messages
+    
+    # -------------------------------------------------
+    # 2. Build memory injection message
+    # -------------------------------------------------
+    def _build_memory_message(self) -> dict | None:
+        """
+        Loads recent past turns from the memory store and formats them
+        as a single user message injected at the start of the conversation.
+        Injected as 'user' role (not 'system') — local models follow
+        user messages more reliably than extra system messages.
+        """
+        # Critical implementation details:
+            # 1. Memory is injected as a user message rather than a system prompt, 
+                # which is important because system prompts usually can’t be changed mid-conversation, 
+                # while user messages keep the conversational flow and are treated as context rather than instructions.
+            # 2. Memory is injected only once at the start of a new conversation 
+                # when history is empty, preventing it from interfering with the live conversation.
+        if not self.memory_store:
+            return None
+ 
+        memories = self.memory_store.get_recent(self.memory_injection_limit)
+        if not memories:
+            return None
+ 
+        lines = []
+        for m in memories:
+            timestamp = m.get("timestamp", "")[:10]   # just the date
+            lines.append(f"[{timestamp}] [{m['role']}] {m['content']}")
+ 
+        content = MEMORY_PROMPT.replace("{memory}", "\n".join(lines))
+        return {"role": "user", "content": content}
+    
+    # -------------------------------------------------
+    # 3. Truncate history to avoid context bloat
+    # -------------------------------------------------
+    # TRUNCATE HISTORY: Keep only system + current task + last 9 turns
+    # This prevents context bloat and local model regression
+    def _truncate_messages(self, messages: list) -> list:
+        """Keep system prompt + memory message + last 9 turns to prevent context window overflow."""
+        # Count fixed prefix messages (system + optional memory)
+        prefix = 2 if (len(messages) > 1 and "MEMORY CONTEXT" in messages[1].get("content", "")) else 1
+        if len(messages) > prefix + 9:
+            return messages[:prefix] + messages[-(9):]
+        return messages
+    
+    # -------------------------------------------------
+    # 4. Call the LLM
+    # -------------------------------------------------
     def _format_history(self, messages: list[dict]) -> list[dict]:
         """
         Ensure all messages are valid OpenAI-compatible dicts.
@@ -125,30 +215,13 @@ class ReactAgent:
 
         return formatted
 
-    def _build_messages(self, task: str) -> list:
-        """Build the initial messages list."""
-        system_prompt = SYSTEM_PROMPT.format(tools=self.registry.describe_tools())
-        # system_prompt = SYSTEM_PROMPT.replace("{tools}", self.registry.describe_tools())
-        return [
-            {"role": "system", "content": system_prompt},
-            {"role": "user",   "content": task},
-        ]
-    
-    # TRUNCATE HISTORY: Keep only system + current task + last 9 turns
-    # This prevents context bloat and local model regression
-    def _truncate_messages(self, messages: list) -> list:
-        """Keep system prompt + last 9 turns to prevent context window overflow."""
-        if len(messages) > 10:
-            return [messages[0], {"role": "system", "content": "..."}] + messages[-9:]
-        return messages
-    
     def _call_llm(self, messages: list) -> str:
         """Call the LLM and get raw text back."""
         response = self.client.chat.completions.create(
             model=self.model,
             messages=self._format_history(messages),
             temperature=0.0,
-            max_tokens=1024,
+            max_tokens=8192,
             extra_body={
                 "repetition_penalty": 1.1,  # Reduces hallucination loops
                 # "mirostat_mode": 2,         # Adaptive temperature for local models
@@ -178,6 +251,9 @@ class ReactAgent:
         # to occasionally pick lower-probability words just to keep the text from becoming a repetitive loop.
         return response.choices[0].message.content
     
+    # -------------------------------------------------
+    # 5. Parse raw LLM output into Python dict
+    # -------------------------------------------------
     def _parse_raw(self, raw: str) -> dict | list | None:
         """
         Strip markdown fences, then parse JSON.
@@ -219,6 +295,9 @@ class ReactAgent:
             self._log(f"[ERROR] Could not parse JSON: {e}")
             return None
 
+    # -------------------------------------------------
+    # 6. Execute a tool and append to history
+    # -------------------------------------------------
     def _execute_tool(self, validated: ToolCall, raw: str, messages: list) -> list:
         """Run the tool, log the result, and append both sides to history."""
         self._log(f"[THOUGHT] {validated.thought}")
@@ -240,6 +319,23 @@ class ReactAgent:
         })
         return messages
     
+    # -------------------------------------------------
+    # 7. Persist completed turn to memory
+    # -------------------------------------------------
+ 
+    def _save_to_memory(self, task: str, answer: str):
+        """Save the completed user+assistant turn to long-term memory."""
+        if self.memory_store:
+            self.memory_store.save_turn(
+                session_id=self.session_id,
+                user_input=task,
+                agent_answer=answer,
+            )
+            self._log(f"[MEMORY] Turn saved to memory (session: {self.session_id[:8]}...)")
+
+    # -------------------------------------------------
+    # MAIN LOOP
+    # -------------------------------------------------        
     def run(self, task: str) -> str:
         messages = self._build_messages(task)
  
@@ -281,6 +377,7 @@ class ReactAgent:
             # Final answer
             if isinstance(validated, FinalAnswer):
                 self._log("[DONE] Final answer reached.")
+                self._save_to_memory(task, validated.answer)  # ← persist here
                 return validated.answer
  
             # Tool call (handle both single ToolCall and list of ToolCalls)

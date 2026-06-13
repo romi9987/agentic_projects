@@ -29,3 +29,9 @@ src/apps/info_retrieval/all_docs/*.*
 
 # Dev files
 helper.md
+
+# Env
+.env
+
+# Memory files
+src/apps/react_agent/agent_memory.json
