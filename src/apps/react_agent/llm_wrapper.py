@@ -55,6 +55,8 @@ RULES
 - Arguments MUST match each tool's input_schema exactly
 - One tool call per response
 - Return ONLY valid JSON
+- When a tool returns a markdown table, copy it into your final answer exactly as-is, 
+do not reformat or reconstruct it
 """
 
 # Rules Explanation

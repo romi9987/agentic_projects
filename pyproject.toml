@@ -10,6 +10,7 @@ dependencies = [
     "chromadb>=1.0.20",
     "crewai>=0.177.0",
     "datasets>=4.0.0",
+    "ddgs>=9.14.4",
     "fastapi>=0.116.1",
     "flagembedding",
     "gradio>=5.44.1",
@@ -32,9 +33,11 @@ dependencies = [
     "torch>=2.8.0",
     "torchaudio>=2.8.0",
     "torchvision>=0.23.0",
+    "tradingview-ta>=3.3.0",
     "transformers>=4.56.1",
     "uvicorn>=0.35.0",
     "weaviate-client>=4.16.9",
+    "yfinance>=1.4.1",
 ]
 
 [tool.uv.sources]
