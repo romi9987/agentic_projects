@@ -10,6 +10,8 @@ from typing import Annotated, Any, Callable, Dict, List, Literal, Union
 from pydantic import BaseModel, Field
 from tradingview_ta import TA_Handler, Interval
 
+from memory import MemoryStore
+
 # Why Pydantic?
 # Pydantic models act as contracts. They:
 # 1. Validate incoming data automatically.
@@ -62,9 +64,12 @@ class ToolRegistry: # use it mainly to register and retrieve tools
     """
     def __init__(self):
         self.tools: Dict[str, Tool] = {}
+        self.destructive_tools: set = set()   # ← add destructive tools
 
-    def register(self, tool: Tool):
+    def register(self, tool: Tool, destructive: bool = False):
         self.tools[tool.name] = tool
+        if destructive:
+            self.destructive_tools.add(tool.name)   # ← track destructive tools like delete_all_memory
 
     def get(self, name: str) -> Tool:
         if name not in self.tools:
@@ -386,6 +391,33 @@ def get_stock_history(ticker: str, days: int = 7) -> str:
     except Exception as e:
         return f"Error fetching history for '{ticker}': {e}"
 
+##### Creating the Delete Memory Tool with a Factory Pattern ######
+# We need a tool that can delete memory, but tools need access to agent state (the memory_store object), 
+# while remaining stateless from the model's perspective.    
+
+# This is a perfect use case for the factory pattern.
+# This pattern is essential whenever your tools need to access resources beyond their direct parameters. 
+# You’ll see it in production systems for database connections, API clients, file systems, and more.
+# How it works:
+    # The outer function (make_delete_all_memory_tool) captures the memory_store in a closure.
+    # The inner function (delete_all_memory) is the actual tool, with a clean signature (no arguments)
+    # The LLM only sees the inner function’s arguments, maintaining abstraction
+# We can create multiple versions of the tool with different state (e.g., dev vs. prod memory stores)
+
+# This tool needs memory_store passed in — but at module level in tools.py the memory_store doesn't exist yet, 
+# it's created in app.py. So the tool registration needs to move there.
+def make_delete_all_memory_tool(memory_store: MemoryStore):
+    def delete_all_memory(confirm: str):
+        if confirm.lower() != "true":
+            raise ValueError(
+                "delete_all_memory called without explicit confirmation"
+            )
+        
+        memory_store.delete_all()
+        return "All long-term memory has been permanently deleted."
+    
+    return delete_all_memory
+
 # =========================================================
 # INPUT SCHEMAS
 # =========================================================
@@ -440,6 +472,13 @@ class StockHistoryArgs(BaseModel):
         description="Number of past days to retrieve (e.g. 7, 14, 30)"
     )
 
+class DeleteAllMemoryArgs(BaseModel):
+    confirm: Literal["true"] = Field(
+        # The Literal["true"] constraint forces the LLM to explicitly pass confirm="true", 
+        # making accidental deletion nearly impossible.
+        description="Must be 'true' to confirm permanent deletion of all memory."
+    )
+
 # =========================================================
 # LLM RESPONSE SCHEMAS (ReAct pattern)
 # =========================================================
@@ -454,12 +493,18 @@ class ToolCall(BaseModel):
     tool_name: str
     args: Dict[str, Any]
 
+class HumanApproval(BaseModel):
+    action: Literal["human"]
+    reason: str
+
 class FinalAnswer(BaseModel):
     action: Literal["final"]
     answer: str
 
+# Now the LLM has three possible actions:
+# Call a tool, request human approval, or provide a final answer.
 LLMResponse = Annotated[
-    Union[ToolCall, FinalAnswer],
+    Union[ToolCall, FinalAnswer, HumanApproval],
     Field(discriminator="action"),
 ]
 
@@ -477,9 +522,10 @@ def _parse_single(data: dict):
         return ToolCall.model_validate(data)
     elif action == "final":
         return FinalAnswer.model_validate(data)
+    elif action == "human":
+        return HumanApproval.model_validate(data)
     else:
-        raise ValueError(f"Unknown action: '{action}'. Must be 'tool' or 'final'.")
-
+        raise ValueError(f"Unknown action: '{action}'. Must be 'tool', 'final', or 'human'.")
 
 def parse_llm_response(data):
     # Local models sometimes wrap the response in a list
@@ -503,7 +549,6 @@ def parse_llm_response(data):
 # =========================================================
 # REGISTER TOOLS
 # =========================================================
-
 registry = ToolRegistry()
 
 registry.register(Tool(
@@ -604,3 +649,6 @@ registry.register(Tool(
     input_schema=StockHistoryArgs,
     func=get_stock_history,
 ))
+
+# make_delete_all_memory_tool is registered in app.py
+

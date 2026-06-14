@@ -4,7 +4,7 @@ from openai import OpenAI
 from pydantic import ValidationError
 
 from memory import MemoryStore
-from tools import FinalAnswer, ToolRegistry, ToolCall, parse_llm_response
+from tools import FinalAnswer, HumanApproval, ToolRegistry, ToolCall, parse_llm_response
 
 
 # =========================================================
@@ -42,6 +42,17 @@ FINAL ANSWER (when you have everything you need)
 }}
 
 --------------------------------------------------
+HUMAN APPROVAL — use this before irreversible actions
+--------------------------------------------------
+
+{
+  "action": "human",
+  "reason": "Explain clearly why approval is needed"
+}
+
+NOTICE: The "human" action has exactly TWO fields: "action" and "reason".
+
+--------------------------------------------------
 AVAILABLE TOOLS
 --------------------------------------------------
 
@@ -50,13 +61,38 @@ AVAILABLE TOOLS
 --------------------------------------------------
 RULES
 --------------------------------------------------
+RESPONSE FORMAT:
+- Return a single JSON object per response
+- The JSON structure itself must never contain markdown, code fences, or extra text
+- Inside the "answer" field of a "final" response, markdown IS allowed and encouraged
+  when it improves readability (tables, bold, headers)
+- When a tool returns a markdown table, copy it into "answer" exactly as-is,
+  do not reformat, reconstruct, or add missing rows
 
-- Only call tools listed above
-- Arguments MUST match each tool's input_schema exactly
-- One tool call per response
-- Return ONLY valid JSON
-- When a tool returns a markdown table, copy it into your final answer exactly as-is, 
-do not reformat or reconstruct it
+ACTION TYPES:
+- "action" must be exactly one of: "tool", "final", "human"
+- Never repeat the "action" key in a response
+
+TOOL CALLS ("action": "tool"):
+- Only call tools listed in AVAILABLE TOOLS above
+- "tool_name" must exactly match a listed tool name
+- "args" must match the tool's input_schema exactly
+- Wait for the observation after each tool call before deciding the next action
+
+FINAL ANSWER ("action": "final"):
+- Use this when you have all the information needed to answer the user
+- When a tool returns a markdown table, copy it into "answer" exactly as-is
+
+HUMAN APPROVAL ("action": "human"):
+- The "human" action has exactly two fields: "action" and "reason". No other fields.
+- You MUST use this action BEFORE any irreversible or destructive operation
+  (e.g. deleting memory, resetting state, permanently altering stored data)
+- "reason" must clearly explain what action requires approval and why
+- After a "human" action:
+    - If approval is GIVEN: your next response MUST be a "tool" action to proceed
+    - If approval is DENIED: your next response MUST be a "final" action informing
+      the user the action was cancelled
+- Never use "human" twice in a row
 """
 
 # Rules Explanation
@@ -71,6 +107,15 @@ do not reformat or reconstruct it
 # We maintain a clear audit trail of actions
 # This is the essence of the ReAct pattern: 
 # explicit reasoning (“thought”) followed by explicit actions (“tool_name” + “args”).
+
+# Human-in-the-Loop (HITL) - human approval - is a design pattern that creates a checkpoint 
+# before critical operations, giving you control over high-stakes decisions.
+# Good HITL design requires approval for:
+    # 1. Irreversible actions: Deleting data, sending emails, making purchases
+    # 2. High-cost operations: Running expensive API calls, deploying code
+    # 3. Sensitive data access: Reading private files, accessing credentials
+    # 4. External communications: Posting to social media, contacting people
+# For our agent, we’ll focus on a particularly dangerous operation: ➡ Deleting all memory.
 
 MEMORY_PROMPT = """
 --------------------------------------------------
@@ -88,7 +133,6 @@ always prefer the current conversation.
  
 --------------------------------------------------
 """
-
 
 # =========================================================
 # REACT AGENT
@@ -129,11 +173,11 @@ class ReactAgent:
 
     # -------------------------------------------------
     # 1. Build initial messages list
-    # -------------------------------------------------   
+    # -------------------------------------------------
     def _build_messages(self, task: str) -> list:
         """Build the initial messages list."""
-        system_prompt = SYSTEM_PROMPT.format(tools=self.registry.describe_tools())
-        # system_prompt = SYSTEM_PROMPT.replace("{tools}", self.registry.describe_tools())
+        # system_prompt = SYSTEM_PROMPT.format(tools=self.registry.describe_tools())
+        system_prompt = SYSTEM_PROMPT.replace("{tools}", self.registry.describe_tools())
         messages = [
             {"role": "system", "content": system_prompt},
         ]
@@ -308,8 +352,12 @@ class ReactAgent:
  
         try:
             result = self.registry.execute_tool(validated.tool_name, validated.args)
+            # Track if a destructive tool was called this run
+            if validated.tool_name in self.registry.destructive_tools:
+                self._destructive_run = True
         except Exception as e:
             result = f"Tool execution failed: {e}"
+            self._log(f"[ERROR] Tool failed: {str(e)}")
  
         self._log(f"[RESULT]  {result}")
  
@@ -336,9 +384,19 @@ class ReactAgent:
             self._log(f"[MEMORY] Turn saved to memory (session: {self.session_id[:8]}...)")
 
     # -------------------------------------------------
+    # 8. Ask for human approval if needed
+    # -------------------------------------------------
+    # In a production system, you’d replace this with a more sophisticated approval mechanism: 
+    # a web interface, Slack notification, or approval queue system.
+    def _human_approval(self, reason: str) -> bool:
+        choice = input("Approve? (y/n): ").strip().lower()
+        return choice == "y"
+
+    # -------------------------------------------------
     # MAIN LOOP
     # -------------------------------------------------        
     def run(self, task: str) -> str:
+        self._destructive_run = False   # ← reset each run
         messages = self._build_messages(task)
  
         for iteration in range(self.max_iterations):
@@ -379,8 +437,47 @@ class ReactAgent:
             # Final answer
             if isinstance(validated, FinalAnswer):
                 self._log("[DONE] Final answer reached.")
-                self._save_to_memory(task, validated.answer)  # ← persist here
+                if not self._destructive_run:           # ← only save if clean run
+                    self._save_to_memory(task, validated.answer)  # ← persist here
+                else:   # ← not save if destructive tool
+                    self._log("[MEMORY] Skipping memory save — destructive tool was called.")
                 return validated.answer
+            
+            # Human approval
+            if isinstance(validated, HumanApproval):
+                self._log(f"\n[HITL] Approval requested: {validated.reason}")
+
+                messages.append({
+                    "role": "assistant",
+                    "content": json.dumps({"action": "human", "reason": validated.reason}),
+                })
+
+                approved = self._human_approval(validated.reason)
+
+                if approved:
+                    self._log("[HITL] Approved — continuing.")
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "Human approval was requested and granted. "
+                            "You may now proceed with the action that required approval."
+                        ),
+                    })
+                else:
+                    self._log("[HITL] Denied — aborting action.")
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "Human approval was requested and denied. "
+                            "You must NOT perform the action that required approval. "
+                            "Inform the user and suggest alternatives if possible."
+                        ),
+                    })
+                continue
+                # Why continue? Whether approved or denied, you always want to go back to the top of the loop 
+                # and let the LLM decide the next step based on the new message you appended. 
+                # The LLM then either calls the tool (approved) or generates a final answer 
+                # explaining the denial — you don't hardcode that logic here.
  
             # Tool call (handle both single ToolCall and list of ToolCalls)
             calls = validated if isinstance(validated, list) else [validated]

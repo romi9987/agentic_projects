@@ -2,7 +2,7 @@ import os
 from dotenv import load_dotenv
 from openai import OpenAI
 
-from tools import registry
+from tools import registry, Tool, make_delete_all_memory_tool, DeleteAllMemoryArgs
 from llm_wrapper import ReactAgent
 from memory import MemoryStore
 
@@ -55,6 +55,20 @@ if __name__ == "__main__":
         max_entries=50,
     )
 
+    # Register make_delete_all_memory_tool here, not in tools.py.
+    # This pattern — defining the tool factory in tools.py but registering it in app.py — is the right approach 
+    # for any tool that depends on external state like memory_store, a database connection, or an API client. 
+    # It keeps tools.py free of dependencies it shouldn't know about.
+    registry.register(Tool(
+        name="delete_all_memory",
+        description="Permanently deletes all long-term memory. " \
+                    "This action is irreversible and requires human approval before execution.",
+        input_schema=DeleteAllMemoryArgs,
+        func=make_delete_all_memory_tool(memory_store),
+            ),
+        destructive=True,   # ← flag destructive tool here
+        )
+
     agent = ReactAgent(
         client=client,
         registry=registry,
@@ -64,7 +78,7 @@ if __name__ == "__main__":
         memory_store=memory_store,       # pass memory in
         memory_injection_limit=10,       # inject last 10 turns as context
     )
-
+    
     # --- Single task demo ---
     task = """
     What's today's date?
