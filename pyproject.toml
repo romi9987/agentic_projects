@@ -22,6 +22,7 @@ dependencies = [
     "llama-index-llms-langchain>=0.7.1",
     "llama-index-llms-ollama>=0.7.2",
     "llama-index-postprocessor-flag-embedding-reranker>=0.4.1",
+    "loguru>=0.7.3",
     "notebook>=7.4.5",
     "numpy>=2.3.2",
     "ollama>=0.5.3",

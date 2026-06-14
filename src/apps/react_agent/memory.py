@@ -3,6 +3,8 @@ from datetime import datetime, UTC
 from pathlib import Path
 from typing import List, Optional
 
+from logger import log
+
 
 class MemoryStore:
     """
@@ -50,8 +52,10 @@ class MemoryStore:
         return data[-limit:]
     
     def delete_all(self):
+        log.warning(f"Deleting all memory at: {self.file_path}")
         with open(self.file_path, "w") as f:
             json.dump([], f)
+        log.info("Memory file cleared successfully.")
 
     def save_turn(self, session_id: str, user_input: str, agent_answer: str):
         """Convenience method — saves both sides of a completed turn at once."""

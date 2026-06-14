@@ -4,10 +4,18 @@ from openai import OpenAI
 
 from tools import registry, Tool, make_delete_all_memory_tool, DeleteAllMemoryArgs
 from llm_wrapper import ReactAgent
+from logger import log, setup_logger
 from memory import MemoryStore
 
 
 load_dotenv()
+
+setup_logger(
+    log_file=os.getenv("AGENT_LOG_PATH"),
+    verbose=True,
+)
+
+log.info("Agent starting up")
 
 def run_once(agent: ReactAgent, task: str):
     """Run the agent on a single task and print the result."""

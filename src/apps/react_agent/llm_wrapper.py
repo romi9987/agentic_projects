@@ -3,6 +3,7 @@ import uuid
 from openai import OpenAI
 from pydantic import ValidationError
 
+from logger import log
 from memory import MemoryStore
 from tools import FinalAnswer, HumanApproval, ToolRegistry, ToolCall, parse_llm_response
 
@@ -167,10 +168,6 @@ class ReactAgent:
         self.memory_injection_limit = memory_injection_limit
         self.session_id = str(uuid.uuid4())
 
-    def _log(self, *args):
-        if self.verbose:
-            print(*args)
-
     # -------------------------------------------------
     # 1. Build initial messages list
     # -------------------------------------------------
@@ -257,7 +254,7 @@ class ReactAgent:
                 formatted.append({"role": role, "content": content})
             else:
                 # Skip unknown roles rather than silently corrupting history
-                self._log(f"[WARN] Skipping unknown message role: '{role}'")
+                log.warning(f"[WARN] Skipping unknown message role: '{role}'")
 
         return formatted
 
@@ -338,7 +335,7 @@ class ReactAgent:
                     idx += 1
             return objects if len(objects) > 1 else objects[0]
         except Exception as e:
-            self._log(f"[ERROR] Could not parse JSON: {e}")
+            log.error(f"[ERROR] Could not parse JSON: {e}")
             return None
 
     # -------------------------------------------------
@@ -346,9 +343,9 @@ class ReactAgent:
     # -------------------------------------------------
     def _execute_tool(self, validated: ToolCall, raw: str, messages: list) -> list:
         """Run the tool, log the result, and append both sides to history."""
-        self._log(f"[THOUGHT] {validated.thought}")
-        self._log(f"[TOOL]    {validated.tool_name}")
-        self._log(f"[ARGS]    {validated.args}")
+        log.info(f"[THOUGHT] {validated.thought}")
+        log.info(f"[TOOL]    {validated.tool_name}")
+        log.debug(f"[ARGS]    {validated.args}")
  
         try:
             result = self.registry.execute_tool(validated.tool_name, validated.args)
@@ -357,9 +354,9 @@ class ReactAgent:
                 self._destructive_run = True
         except Exception as e:
             result = f"Tool execution failed: {e}"
-            self._log(f"[ERROR] Tool failed: {str(e)}")
+            log.error(f"[ERROR] Tool failed: {str(e)}")
  
-        self._log(f"[RESULT]  {result}")
+        log.info(f"[RESULT]  {result}")
  
         # Append tool call + observation to history
         messages.append({"role": "assistant", "content": raw})
@@ -381,7 +378,7 @@ class ReactAgent:
                 user_input=task,
                 agent_answer=answer,
             )
-            self._log(f"[MEMORY] Turn saved to memory (session: {self.session_id[:8]}...)")
+            log.info(f"[MEMORY] Turn saved to memory (session: {self.session_id[:8]}...)")
 
     # -------------------------------------------------
     # 8. Ask for human approval if needed
@@ -400,13 +397,11 @@ class ReactAgent:
         messages = self._build_messages(task)
  
         for iteration in range(self.max_iterations):
-            self._log(f"\n{'='*48}")
-            self._log(f"  ITERATION {iteration + 1}")
-            self._log(f"{'='*48}\n")
+            log.info(f"  ITERATION {iteration + 1}")
  
             messages = self._truncate_messages(messages)
             raw = self._call_llm(messages)
-            self._log(f"[LLM RAW]\n{raw}\n")
+            log.debug(f"[LLM RAW]\n{raw}\n")
  
             # Parse
             parsed = self._parse_raw(raw)
@@ -424,7 +419,7 @@ class ReactAgent:
             try:
                 validated = parse_llm_response(parsed)
             except (ValueError, ValidationError) as e:
-                self._log(f"[ERROR] Schema mismatch: {e}")
+                log.error(f"[ERROR] Schema mismatch: {e}")
                 messages.append({
                     "role": "user",
                     "content": (
@@ -436,16 +431,16 @@ class ReactAgent:
  
             # Final answer
             if isinstance(validated, FinalAnswer):
-                self._log("[DONE] Final answer reached.")
+                log.success("[DONE] Final answer reached.")
                 if not self._destructive_run:           # ← only save if clean run
                     self._save_to_memory(task, validated.answer)  # ← persist here
                 else:   # ← not save if destructive tool
-                    self._log("[MEMORY] Skipping memory save — destructive tool was called.")
+                    log.info("[MEMORY] Skipping memory save — destructive tool was called.")
                 return validated.answer
             
             # Human approval
             if isinstance(validated, HumanApproval):
-                self._log(f"\n[HITL] Approval requested: {validated.reason}")
+                log.info(f"\n[HITL] Approval requested: {validated.reason}")
 
                 messages.append({
                     "role": "assistant",
@@ -455,7 +450,7 @@ class ReactAgent:
                 approved = self._human_approval(validated.reason)
 
                 if approved:
-                    self._log("[HITL] Approved — continuing.")
+                    log.info("[HITL] Approved — continuing.")
                     messages.append({
                         "role": "user",
                         "content": (
@@ -464,7 +459,7 @@ class ReactAgent:
                         ),
                     })
                 else:
-                    self._log("[HITL] Denied — aborting action.")
+                    log.info("[HITL] Denied — aborting action.")
                     messages.append({
                         "role": "user",
                         "content": (
