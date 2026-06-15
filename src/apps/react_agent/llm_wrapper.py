@@ -5,6 +5,7 @@ from pydantic import ValidationError
 
 from logger import log
 from memory import MemoryStore
+from observer import AgentObserver
 from tools import FinalAnswer, HumanApproval, ToolRegistry, ToolCall, parse_llm_response
 
 
@@ -158,6 +159,7 @@ class ReactAgent:
         verbose: bool = True,
         memory_store: MemoryStore = None,         # optional — agent works without it
         memory_injection_limit: int = 10,         # how many past turns to inject
+        observer: AgentObserver = None
     ):
         self.client = client
         self.registry = registry
@@ -167,6 +169,7 @@ class ReactAgent:
         self.memory_store = memory_store
         self.memory_injection_limit = memory_injection_limit
         self.session_id = str(uuid.uuid4())
+        self.observer = observer or AgentObserver()  # always have one
 
     # -------------------------------------------------
     # 1. Build initial messages list
@@ -393,90 +396,109 @@ class ReactAgent:
     # MAIN LOOP
     # -------------------------------------------------        
     def run(self, task: str) -> str:
+        self.observer.log("run_start", {"task": task[:100]})
         self._destructive_run = False   # ← reset each run
         messages = self._build_messages(task)
  
         for iteration in range(self.max_iterations):
             log.info(f"  ITERATION {iteration + 1}")
- 
-            messages = self._truncate_messages(messages)
-            raw = self._call_llm(messages)
-            log.debug(f"[LLM RAW]\n{raw}\n")
- 
-            # Parse
-            parsed = self._parse_raw(raw)
-            if parsed is None:
-                messages.append({
-                    "role": "user",
-                    "content": (
-                        "Your response was not valid JSON.\n\n"
-                        "Return a single JSON object. No markdown, no code fences."
-                    ),
-                })
-                continue
- 
-            # Validate
-            try:
-                validated = parse_llm_response(parsed)
-            except (ValueError, ValidationError) as e:
-                log.error(f"[ERROR] Schema mismatch: {e}")
-                messages.append({
-                    "role": "user",
-                    "content": (
-                        f"Your JSON did not match the required schema.\n\nError: {e}\n\n"
-                        "Return ONLY valid JSON matching the schema."
-                    ),
-                })
-                continue
- 
-            # Final answer
-            if isinstance(validated, FinalAnswer):
-                log.success("[DONE] Final answer reached.")
-                if not self._destructive_run:           # ← only save if clean run
-                    self._save_to_memory(task, validated.answer)  # ← persist here
-                else:   # ← not save if destructive tool
-                    log.info("[MEMORY] Skipping memory save — destructive tool was called.")
-                return validated.answer
-            
-            # Human approval
-            if isinstance(validated, HumanApproval):
-                log.info(f"\n[HITL] Approval requested: {validated.reason}")
 
-                messages.append({
-                    "role": "assistant",
-                    "content": json.dumps({"action": "human", "reason": validated.reason}),
-                })
+            with self.observer.span(f"iteration_{iteration + 1}"):
 
-                approved = self._human_approval(validated.reason)
-
-                if approved:
-                    log.info("[HITL] Approved — continuing.")
+                with self.observer.span("llm_call"):
+                    messages = self._truncate_messages(messages)
+                    raw = self._call_llm(messages)
+                    log.debug(f"[LLM RAW]\n{raw}\n")
+ 
+                # Parse
+                parsed = self._parse_raw(raw)
+                if parsed is None:
                     messages.append({
                         "role": "user",
                         "content": (
-                            "Human approval was requested and granted. "
-                            "You may now proceed with the action that required approval."
+                            "Your response was not valid JSON.\n\n"
+                            "Return a single JSON object. No markdown, no code fences."
                         ),
                     })
-                else:
-                    log.info("[HITL] Denied — aborting action.")
+                    continue
+    
+                # Validate
+                try:
+                    validated = parse_llm_response(parsed)
+                except (ValueError, ValidationError) as e:
+                    log.error(f"[ERROR] Schema mismatch: {e}")
                     messages.append({
                         "role": "user",
                         "content": (
-                            "Human approval was requested and denied. "
-                            "You must NOT perform the action that required approval. "
-                            "Inform the user and suggest alternatives if possible."
+                            f"Your JSON did not match the required schema.\n\nError: {e}\n\n"
+                            "Return ONLY valid JSON matching the schema."
                         ),
                     })
-                continue
-                # Why continue? Whether approved or denied, you always want to go back to the top of the loop 
-                # and let the LLM decide the next step based on the new message you appended. 
-                # The LLM then either calls the tool (approved) or generates a final answer 
-                # explaining the denial — you don't hardcode that logic here.
+                    continue
  
-            # Tool call (handle both single ToolCall and list of ToolCalls)
-            calls = validated if isinstance(validated, list) else [validated]
-            for call in calls:
-                messages = self._execute_tool(call, raw, messages)
+                # Final answer
+                if isinstance(validated, FinalAnswer):
+                    self.observer.log("final_answer", {
+                            "answer": validated.answer[:200],
+                            "iterations": iteration + 1,
+                        })
+                    log.success("[DONE] Final answer reached.")
+                    if not self._destructive_run:           # ← only save if clean run
+                        self._save_to_memory(task, validated.answer)  # ← persist here
+                    else:   # ← not save if destructive tool
+                        log.info("[MEMORY] Skipping memory save — destructive tool was called.")
+                    return validated.answer
+                
+                # Human approval
+                if isinstance(validated, HumanApproval):
+                    self.observer.log("human_approval_requested", {
+                            "reason": validated.reason,
+                        })
+                    log.info(f"\n[HITL] Approval requested: {validated.reason}")
+
+                    messages.append({
+                        "role": "assistant",
+                        "content": json.dumps({"action": "human", "reason": validated.reason}),
+                    })
+
+                    approved = self._human_approval(validated.reason)
+                    self.observer.log("human_approval_result", {
+                            "approved": approved,
+                        })
+
+                    if approved:
+                        log.info("[HITL] Approved — continuing.")
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "Human approval was requested and granted. "
+                                "You may now proceed with the action that required approval."
+                            ),
+                        })
+                    else:
+                        log.info("[HITL] Denied — aborting action.")
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "Human approval was requested and denied. "
+                                "You must NOT perform the action that required approval. "
+                                "Inform the user and suggest alternatives if possible."
+                            ),
+                        })
+                    continue
+                    # Why continue? Whether approved or denied, you always want to go back to the top of the loop 
+                    # and let the LLM decide the next step based on the new message you appended. 
+                    # The LLM then either calls the tool (approved) or generates a final answer 
+                    # explaining the denial — you don't hardcode that logic here.
+    
+                # Tool call (handle both single ToolCall and list of ToolCalls)
+                calls = validated if isinstance(validated, list) else [validated]
+                for call in calls:
+                    with self.observer.span(f"tool_{call.tool_name}"):
+                            self.observer.log("tool_call", {
+                                "tool_name": call.tool_name,
+                                "args": call.args,
+                            })
+                            messages = self._execute_tool(call, raw, messages)
  
         raise RuntimeError(f"Agent exceeded max_iterations ({self.max_iterations})")

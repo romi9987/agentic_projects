@@ -28,6 +28,8 @@ import os
 import sys
 from loguru import logger
 
+# Loguru is a logging tool — it records human-readable messages for debugging, 
+# with levels, colours, and rotation. You read it with your eyes.
 
 log_file = os.getenv("AGENT_LOG_PATH")
 
