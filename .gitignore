@@ -34,6 +34,4 @@ helper.md
 .env
 
 # Memory and log files
-src/apps/react_agent/agent_memory.json
-src/apps/react_agent/agent_logs.json
-src/apps/react_agent/traces
+src/apps/react_agent/logs

@@ -2,10 +2,11 @@ import os
 from dotenv import load_dotenv
 from openai import OpenAI
 
-from tools import registry, Tool, make_delete_all_memory_tool, DeleteAllMemoryArgs
 from llm_wrapper import ReactAgent
 from logger import log, setup_logger
 from memory import MemoryStore
+from observer import AgentObserver
+from tools import registry, Tool, make_delete_all_memory_tool, DeleteAllMemoryArgs
 
 
 load_dotenv()
@@ -76,6 +77,8 @@ if __name__ == "__main__":
             ),
         destructive=True,   # ← flag destructive tool here
         )
+    
+    observer = AgentObserver()
 
     agent = ReactAgent(
         client=client,
@@ -85,6 +88,7 @@ if __name__ == "__main__":
         verbose=True,
         memory_store=memory_store,       # pass memory in
         memory_injection_limit=10,       # inject last 10 turns as context
+        observer=observer,        # ← pass it in
     )
     
     # --- Single task demo ---

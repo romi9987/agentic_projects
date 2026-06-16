@@ -1,4 +1,5 @@
 import json
+import time
 import uuid
 from openai import OpenAI
 from pydantic import ValidationError
@@ -344,20 +345,86 @@ class ReactAgent:
     # -------------------------------------------------
     # 6. Execute a tool and append to history
     # -------------------------------------------------
+    def _safe_tool_call(self, tool_name: str, args: dict, retries: int = 2) -> str:
+        # Takes tool_name and args instead of a raw tool object 
+        # — keeps it consistent with how the rest of the agent works through the registry 
+
+        # Validates args via Pydantic before attempting the call
+        # — catches schema errors before they hit the function
+
+        # Adds time.sleep(0.5 * attempt) exponential backoff between retries — avoids hammering a flaky API
+
+        # Returns an error string instead of None on total failure — 
+        # the agent can read the error as an observation and decide what to do rather than receiving a silent None
+
+        # Retries are effective for:
+            # Transient network errors: Temporary connectivity issues
+            # Rate limiting: Brief API throttling
+            # Server overload: Temporary unavailability (503 errors)
+        # Retries are NOT effective for:
+            # Invalid parameters: Will fail every time
+            # Authentication errors: Need to fix credentials, not retry
+            # Resource not found: Won’t magically appear on retry
+            # Quota exhausted: Need to wait for quota reset, not immediate retry
+        """
+        Calls a tool safely with retry logic, timing, and error logging.
+        Returns tool result string, or error message after all retries exhausted.
+        """
+        tool = self.registry.get(tool_name)
+        validated_args = tool.input_schema(**args)
+
+        attempt = 0
+        while attempt <= retries:
+            try:
+                with self.observer.span(f"tool:{tool_name}"):
+                    result = tool(**validated_args.model_dump())
+
+                self.observer.log("tool_call_result", {
+                    "tool_name": tool_name,
+                    "success": True,
+                    "attempt": attempt + 1,
+                })
+                log.info(f"[TOOL OK] {tool_name} (attempt {attempt + 1})")
+                return result
+
+            except Exception as e:
+                attempt += 1
+                self.observer.log("tool_call_error", {
+                    "tool_name": tool_name,
+                    "attempt": attempt,
+                    "error": str(e),
+                })
+                log.warning(f"[TOOL FAIL] {tool_name} attempt {attempt}: {e}")
+
+                if attempt > retries:
+                    self.observer.log("tool_call_failed", {"tool_name": tool_name})
+                    log.error(f"[TOOL DEAD] {tool_name} failed after {retries + 1} attempts")
+                    return f"Tool '{tool_name}' failed after {retries + 1} attempts: {str(e)}"
+
+                log.info(f"[TOOL RETRY] {tool_name} retrying...")
+                time.sleep(0.5 * attempt)  # brief backoff between retries
+    
     def _execute_tool(self, validated: ToolCall, raw: str, messages: list) -> list:
         """Run the tool, log the result, and append both sides to history."""
         log.info(f"[THOUGHT] {validated.thought}")
         log.info(f"[TOOL]    {validated.tool_name}")
         log.debug(f"[ARGS]    {validated.args}")
  
-        try:
-            result = self.registry.execute_tool(validated.tool_name, validated.args)
-            # Track if a destructive tool was called this run
-            if validated.tool_name in self.registry.destructive_tools:
-                self._destructive_run = True
-        except Exception as e:
-            result = f"Tool execution failed: {e}"
-            log.error(f"[ERROR] Tool failed: {str(e)}")
+        # Track destructive tools
+        if validated.tool_name in self.registry.destructive_tools:
+            self._destructive_run = True
+        
+        # try:
+        #     result = self.registry.execute_tool(validated.tool_name, validated.args)
+        #     # Track if a destructive tool was called this run
+        #     if validated.tool_name in self.registry.destructive_tools:
+        #         self._destructive_run = True
+        # except Exception as e:
+        #     result = f"Tool execution failed: {e}"
+        #     log.error(f"[ERROR] Tool failed: {str(e)}")
+
+        # Use safe call instead of bare execute_tool
+        result = self._safe_tool_call(validated.tool_name, validated.args)
  
         log.info(f"[RESULT]  {result}")
  
@@ -495,10 +562,10 @@ class ReactAgent:
                 calls = validated if isinstance(validated, list) else [validated]
                 for call in calls:
                     with self.observer.span(f"tool_{call.tool_name}"):
-                            self.observer.log("tool_call", {
-                                "tool_name": call.tool_name,
-                                "args": call.args,
-                            })
-                            messages = self._execute_tool(call, raw, messages)
+                        self.observer.log("tool_call", {
+                            "tool_name": call.tool_name,
+                            "args": call.args,
+                        })
+                        messages = self._execute_tool(call, raw, messages)
  
         raise RuntimeError(f"Agent exceeded max_iterations ({self.max_iterations})")
