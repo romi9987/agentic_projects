@@ -78,7 +78,7 @@ if __name__ == "__main__":
         destructive=True,   # ← flag destructive tool here
         )
     
-    observer = AgentObserver()
+    observer = AgentObserver(os.getenv("AGENT_OBSERVER_DIR"))
 
     agent = ReactAgent(
         client=client,
