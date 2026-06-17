@@ -98,27 +98,6 @@ HUMAN APPROVAL ("action": "human"):
 - Never use "human" twice in a row
 """
 
-# Rules Explanation
-# Why these rules need to be strict?
-# LLMs are trained to be helpful and will often try to “help” by doing math 
-# or reasoning internally. 
-# But we want our agent to be observable and reliable. 
-# By forcing it to use tools for every operation:
-# We can log and debug each step
-# We can swap tool implementations without changing the agent
-# We can test tools independently
-# We maintain a clear audit trail of actions
-# This is the essence of the ReAct pattern: 
-# explicit reasoning (“thought”) followed by explicit actions (“tool_name” + “args”).
-
-# Human-in-the-Loop (HITL) - human approval - is a design pattern that creates a checkpoint 
-# before critical operations, giving you control over high-stakes decisions.
-# Good HITL design requires approval for:
-    # 1. Irreversible actions: Deleting data, sending emails, making purchases
-    # 2. High-cost operations: Running expensive API calls, deploying code
-    # 3. Sensitive data access: Reading private files, accessing credentials
-    # 4. External communications: Posting to social media, contacting people
-# For our agent, we’ll focus on a particularly dangerous operation: ➡ Deleting all memory.
 
 MEMORY_PROMPT = """
 --------------------------------------------------

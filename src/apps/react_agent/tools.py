@@ -12,12 +12,6 @@ from tradingview_ta import TA_Handler, Interval
 
 from memory import MemoryStore
 
-# Why Pydantic?
-# Pydantic models act as contracts. They:
-# 1. Validate incoming data automatically.
-# 2. Provide clear error messages when data is invalid.
-# 3. Enable IDE autocomplete for better developer experience.
-# 4. Generate JSON schemas that modern LLMs can use for structured output.
 
 load_dotenv()
 
@@ -44,9 +38,9 @@ class Tool:
         # self.output_schema = output_schema
         self.func = func
     
+    def __call__(self, **kwargs):
         # The __call__ method makes our Tool instances callable, 
         # so we can use them like regular functions: tool(a=5, b=3)
-    def __call__(self, **kwargs):
         return self.func(**kwargs)
 
     def to_prompt_schema(self) -> Dict[str, Any]:
@@ -75,9 +69,13 @@ class ToolRegistry: # use it mainly to register and retrieve tools
         if name not in self.tools:
             raise ValueError(f"Tool '{name}' not found. Available: {list(self.tools.keys())}")
         return self.tools[name]
-    # List tools method is particularly important because it generates 
-    # a machine-readable description of all available tools.
+    
     def list_tools(self) -> List[Dict[str, Any]]:
+        # List tools method is particularly important because it generates 
+        # a machine-readable description of all available tools.
+        # When we pass this to the LLM in the system prompt, 
+        # it learns what capabilities it has access to.
+        # This method returns the JSON schema that tells the LLM exactly how to call each tool.
         return [
             {
                 "name": tool.name,
@@ -86,23 +84,14 @@ class ToolRegistry: # use it mainly to register and retrieve tools
             }
             for tool in self.tools.values()
         ]
-
-    # get_tool_call_args_type creates a Union type of all possible tool argument schemas. 
-    # In Python typing, a Union means “one of these types.” 
-    # So if you have two tools, it creates: Union[ToolAddArgs, ToolMultiplyArgs].
-    # Why does this matter? When the LLM responds with a tool call, 
-    # Pydantic will validate that the arguments match one of these schemas. 
-    # If the LLM tries to pass {"a": "five", "b": 3} (a string instead of an integer),
-    #  Pydantic will catch it before the tool even executes. 
-    # This prevents runtime errors and provides clear feedback.
+ 
     # def get_tool_call_args_type(self):
     #     input_args_models = [tool.input_schema for tool in self.tools.values()]
     #     return Union[tuple(input_args_models)]
     
-    # execute_tool checks valid tool names: 
-    # Literal["add", "multiply"]. This is a powerful constraint, 
-    # the LLM can only return tool names that actually exist in the registry.
     def execute_tool(self, name: str, args: Dict[str, Any]) -> Any:
+        # checks valid tool names
+        # the LLM can only return tool names that actually exist in the registry.
         tool = self.get(name)
         if not tool:
             return f"Error: Unknown tool '{name}'. Available: {list(self.tools.keys())}"
@@ -486,6 +475,7 @@ class DeleteAllMemoryArgs(BaseModel):
 # Get type-safe tool names and arguments
 # ToolNameLiteral = registry.get_tool_names()
 # ToolArgsUnion = registry.get_tool_call_args_type()
+# get_tool_call_args_type creates a Union type of all possible tool argument schemas.
 
 class ToolCall(BaseModel):
     action: Literal["tool"]
@@ -501,20 +491,11 @@ class FinalAnswer(BaseModel):
     action: Literal["final"]
     answer: str
 
-# Now the LLM has three possible actions:
-# Call a tool, request human approval, or provide a final answer.
 LLMResponse = Annotated[
     Union[ToolCall, FinalAnswer, HumanApproval],
     Field(discriminator="action"),
 ]
 
-# This structure enforces the ReAct pattern. The LLM must:
-# 1. Choose an action type (“tool” or “final”)
-# 2. If calling a tool: provide a thought process, tool name, and valid arguments
-# 3, If giving a final answer: provide the answer text
-# 4. The ToolNameLiteral ensures the LLM can only call tools that actually exist. 
-# The ToolArgsUnion ensures arguments match the expected schema 
-# for whichever tool is being called.
 
 def _parse_single(data: dict):
     action = data.get("action")
