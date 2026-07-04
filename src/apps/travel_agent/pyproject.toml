@@ -1,0 +1,11 @@
+[project]
+name = "react-agent-v5"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "black>=25.9.0",
+    "pyright>=1.1.411",
+    "ruff>=0.14.1",
+]
